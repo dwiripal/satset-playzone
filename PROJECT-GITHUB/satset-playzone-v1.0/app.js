@@ -1,4 +1,8 @@
 const STORAGE_KEY = 'satset_playzone_v1_state';
+const WIB_TZ = 'Asia/Jakarta';
+const SYNC_INTERVAL_MS = 15000;
+let syncBusy = false;
+let syncTimer = null;
 const DEFAULT_PACKAGES = [
   { id: 'try', name: 'Coba Dulu', minutes: 5, price: 5000, badge: 'Entry' },
   { id: 'seru', name: 'Paket Seru', minutes: 15, price: 10000, badge: 'Rekomendasi' },
@@ -18,10 +22,10 @@ let reportMode = 'today';
 let customStart = todayKey();
 let customEnd = todayKey();
 
-function todayKey(date = new Date()) { return date.toISOString().slice(0,10); }
+function todayKey(date = new Date()) { return new Intl.DateTimeFormat('en-CA', { timeZone: WIB_TZ, year:'numeric', month:'2-digit', day:'2-digit' }).format(date); }
 function rupiah(n) { return new Intl.NumberFormat('id-ID', { style:'currency', currency:'IDR', maximumFractionDigits:0 }).format(Number(n || 0)); }
-function timeOnly(ts) { return ts ? new Date(ts).toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit' }) : '-'; }
-function dateTime(ts) { return ts ? new Date(ts).toLocaleString('id-ID', { dateStyle:'medium', timeStyle:'short' }) : '-'; }
+function timeOnly(ts) { return ts ? new Date(ts).toLocaleTimeString('id-ID', { timeZone: WIB_TZ, hour:'2-digit', minute:'2-digit' }) : '-'; }
+function dateTime(ts) { return ts ? new Date(ts).toLocaleString('id-ID', { timeZone: WIB_TZ, dateStyle:'medium', timeStyle:'short' }) : '-'; }
 function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
 function esc(v){ return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function toMinutes(str){ const [h,m] = String(str || '00:00').split(':').map(Number); return (h || 0) * 60 + (m || 0); }
@@ -36,7 +40,7 @@ function loadState(){
     sessions: [],
     activeSessions: [],
     activeSession: null,
-    settings: { pin: '', ownerName: 'Owner', sound: true, openTime: '09:00', closeTime: '21:00', enforceHours: false, operationMode: 'auto', businessName: 'SATSET PLAYZONE', profileText: 'Owner control · Multi unit RC · Cash only', logoText: 'SP', logoImage: '' }
+    settings: { ownerName: 'Owner', sound: true, openTime: '09:00', closeTime: '21:00', enforceHours: false, operationMode: 'auto', businessName: 'SATSET PLAYZONE', profileText: 'Owner control · Multi unit RC · Cash only', logoText: 'SP', logoImage: '', syncEnabled: false, syncUrl: '', syncDeviceName: 'Owner 1', lastSyncAt: '', syncStatus: 'Belum aktif' }, updatedAt: Date.now()
   };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -54,11 +58,19 @@ function migrateState(s){
     s.activeSessions.unshift(s.activeSession);
     s.activeSession = null;
   }
-  s.settings = { pin: '', ownerName: 'Owner', sound: true, openTime: '09:00', closeTime: '21:00', enforceHours: false, operationMode: 'auto', businessName: 'SATSET PLAYZONE', profileText: 'Owner control · Multi unit RC · Cash only', logoText: 'SP', logoImage: '', ...(s.settings || {}) };
+  s.settings = { ownerName: 'Owner', sound: true, openTime: '09:00', closeTime: '21:00', enforceHours: false, operationMode: 'auto', businessName: 'SATSET PLAYZONE', profileText: 'Owner control · Multi unit RC · Cash only', logoText: 'SP', logoImage: '', syncEnabled: false, syncUrl: '', syncDeviceName: 'Owner 1', lastSyncAt: '', syncStatus: 'Belum aktif', ...(s.settings || {}) };
+  delete s.settings.pin;
+  s.updatedAt = Number(s.updatedAt || Date.now());
   syncUnitStatuses(s, false);
   return s;
 }
-function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+function saveState(options = {}){
+  const shouldPush = options.push !== false;
+  state.updatedAt = Date.now();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (shouldPush) scheduleSyncPush();
+}
+function persistWithoutTouch(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 
 function ensureDay(){
   if (!state.day || state.day.date !== todayKey()) {
@@ -140,6 +152,79 @@ function toast(msg){
   el.classList.add('show');
   setTimeout(()=>el.classList.remove('show'),2600);
 }
+
+function syncUrl(){ return String(state.settings.syncUrl || '').trim(); }
+function canSync(){ return Boolean(state.settings.syncEnabled && syncUrl()); }
+function syncStamp(){ return new Date().toLocaleString('id-ID', { timeZone: WIB_TZ, dateStyle:'short', timeStyle:'medium' }); }
+function setSyncStatus(text){ state.settings.syncStatus = text; state.settings.lastSyncAt = syncStamp(); persistWithoutTouch(); }
+function cleanStateForSync(){
+  return JSON.parse(JSON.stringify({
+    day: state.day,
+    packages: state.packages,
+    units: state.units,
+    sessions: state.sessions,
+    activeSessions: state.activeSessions,
+    settings: state.settings,
+    updatedAt: state.updatedAt || Date.now()
+  }));
+}
+function replaceStateFromRemote(remote){
+  if (!remote || typeof remote !== 'object') return false;
+  const merged = migrateState(remote);
+  Object.keys(state).forEach(k => delete state[k]);
+  Object.assign(state, merged);
+  syncUnitStatuses(state, false);
+  persistWithoutTouch();
+  render();
+  return true;
+}
+function scheduleSyncPush(){
+  if (!canSync()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(()=>syncPush(false), 700);
+}
+async function syncPush(showToast = true){
+  if (!canSync()) { if (showToast) toast('Aktifkan Google Sync dan isi URL Apps Script dulu.'); return; }
+  if (syncBusy) return;
+  syncBusy = true;
+  try {
+    const payload = { action:'push', device: state.settings.syncDeviceName || 'Owner', updatedAt: state.updatedAt || Date.now(), state: cleanStateForSync() };
+    const res = await fetch(syncUrl(), { method:'POST', headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body: JSON.stringify(payload) });
+    const data = await res.json().catch(()=>({ ok: res.ok }));
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    setSyncStatus(`Tersimpan ke Google Sync oleh ${payload.device}`);
+    if (showToast) toast('Data berhasil dikirim ke Google Sync.');
+  } catch (err) {
+    setSyncStatus(`Sync gagal: ${err.message}`);
+    if (showToast) toast('Google Sync gagal. Cek URL/izin Apps Script.');
+  } finally { syncBusy = false; }
+}
+async function syncPull(showToast = true){
+  if (!canSync()) { if (showToast) toast('Aktifkan Google Sync dan isi URL Apps Script dulu.'); return; }
+  if (syncBusy) return;
+  syncBusy = true;
+  try {
+    const url = syncUrl() + (syncUrl().includes('?') ? '&' : '?') + 'action=pull&t=' + Date.now();
+    const res = await fetch(url, { method:'GET', cache:'no-store' });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    const remoteState = data.state;
+    const remoteUpdated = Number(data.updatedAt || remoteState?.updatedAt || 0);
+    const localUpdated = Number(state.updatedAt || 0);
+    if (remoteState && remoteUpdated > localUpdated) {
+      replaceStateFromRemote(remoteState);
+      setSyncStatus('Data terbaru ditarik dari Google Sync');
+      if (showToast) toast('Data terbaru berhasil ditarik.');
+    } else {
+      setSyncStatus('Data lokal sudah paling baru');
+      if (showToast) toast('Data lokal sudah paling baru.');
+    }
+  } catch (err) {
+    setSyncStatus(`Sync gagal: ${err.message}`);
+    if (showToast) toast('Tarik data gagal. Cek URL/izin Apps Script.');
+  } finally { syncBusy = false; }
+}
+async function syncNow(){ await syncPush(true); await syncPull(false); render(); }
 function beep(){
   if (!state.settings.sound) return;
   try {
@@ -254,9 +339,25 @@ function deleteUnit(id){
   saveState(); render(); toast('Unit dihapus.');
 }
 function updateSetting(field, value){
-  if (field === 'sound' || field === 'enforceHours') state.settings[field] = Boolean(value);
+  if (field === 'sound' || field === 'enforceHours' || field === 'syncEnabled') state.settings[field] = Boolean(value);
   else state.settings[field] = value;
   saveState(); render();
+}
+function saveSettingsFromForm(){
+  const val = id => document.querySelector(id)?.value;
+  const checked = id => Boolean(document.querySelector(id)?.checked);
+  state.settings.businessName = val('#setBusinessName') || 'SATSET PLAYZONE';
+  state.settings.profileText = val('#setProfileText') || 'Owner control · Multi unit RC · Cash only';
+  state.settings.logoText = val('#setLogoText') || 'SP';
+  state.settings.operationMode = val('#setOperationMode') || 'auto';
+  state.settings.openTime = val('#setOpenTime') || '09:00';
+  state.settings.closeTime = val('#setCloseTime') || '21:00';
+  state.settings.enforceHours = checked('#setEnforceHours');
+  state.settings.sound = checked('#setSound');
+  state.settings.syncEnabled = checked('#setSyncEnabled');
+  state.settings.syncUrl = val('#setSyncUrl') || '';
+  state.settings.syncDeviceName = val('#setSyncDeviceName') || 'Owner';
+  saveState(); render(); toast('Setting berhasil disimpan.');
 }
 function exportCSV(){
   const range = getReportRange();
@@ -332,8 +433,7 @@ function dashboardView(){
   const available = state.units.filter(u => u.status === 'available').length;
   const broken = state.units.filter(u => u.status === 'broken').length;
   return `
-    <section class="card hero compact-hero"><h2>Kontrol rental RC</h2><p>${operationModeLabel()}. Cash only.</p></section>
-    <section class="section-title"><h3>Status Unit</h3><span>${available}/${state.units.length} tersedia · ${broken} rusak</span></section>
+    <section class="section-title first-title"><h3>Status Unit</h3><span>${available}/${state.units.length} tersedia · ${broken} rusak</span></section>
     <div class="unit-strip">${state.units.map(unitMini).join('')}</div>
     <section class="section-title"><h3>Mulai Rental</h3><span>Pilih unit + paket</span></section>
     ${startRentalPanel()}
@@ -401,39 +501,51 @@ function settingsView(){
   const range = getReportRange();
   const list = sessionsBetween(range.start, range.end);
   const r = calcReport(list);
-  return `<section class="card hero"><h2>Setting & Privasi</h2><p>Atur jam buka, mode cuti/manual, profil, logo, dan laporan privat dari satu tempat.</p></section>
+  return `<section class="card hero"><h2>Setting & Privasi</h2><p>Simpan setting wajib dipencet setelah ubah jam, mode buka/tutup, profil, logo, atau Google Sync.</p></section>
   <section class="section-title"><h3>Profil Aplikasi</h3><span>logo & nama</span></section>
   <div class="card start-panel">
     <div class="row profile-row"><div class="logo logo-preview">${brandLogoHtml()}</div><div style="flex:1"><strong>${esc(state.settings.businessName || 'SATSET PLAYZONE')}</strong><small>${esc(state.settings.profileText || '')}</small></div></div>
-    <div class="field"><label>Nama aplikasi</label><input value="${esc(state.settings.businessName)}" onchange="updateSetting('businessName',this.value)" placeholder="SATSET PLAYZONE"></div>
-    <div class="field"><label>Profil / tagline kecil</label><input value="${esc(state.settings.profileText)}" onchange="updateSetting('profileText',this.value)" placeholder="Owner control · Multi unit RC · Cash only"></div>
-    <div class="field"><label>Teks logo jika tanpa gambar</label><input maxlength="4" value="${esc(state.settings.logoText)}" onchange="updateSetting('logoText',this.value)" placeholder="SP"></div>
+    <div class="field"><label>Nama aplikasi</label><input id="setBusinessName" value="${esc(state.settings.businessName)}" placeholder="SATSET PLAYZONE"></div>
+    <div class="field"><label>Profil / tagline kecil</label><input id="setProfileText" value="${esc(state.settings.profileText)}" placeholder="Owner control · Multi unit RC · Cash only"></div>
+    <div class="field"><label>Teks logo jika tanpa gambar</label><input id="setLogoText" maxlength="4" value="${esc(state.settings.logoText)}" placeholder="SP"></div>
     <div class="field"><label>Upload logo gambar</label><input type="file" accept="image/*" onchange="uploadLogo(this)"></div>
     <button class="btn ghost full" onclick="clearLogo()">Hapus Logo Gambar</button>
   </div>
 
-  <section class="section-title"><h3>Buka / Tutup</h3><span>${operatingLabel()}</span></section>
+  <section class="section-title"><h3>Buka / Tutup</h3><span>${operatingLabel()} · WIB</span></section>
   <div class="card start-panel">
-    <div class="field"><label>Mode operasional</label><select onchange="updateSetting('operationMode',this.value)">
-      <option value="auto" ${state.settings.operationMode==='auto'?'selected':''}>Otomatis sesuai jam</option>
+    <div class="field"><label>Mode operasional</label><select id="setOperationMode">
+      <option value="auto" ${state.settings.operationMode==='auto'?'selected':''}>Otomatis sesuai jam WIB</option>
       <option value="manual_open" ${state.settings.operationMode==='manual_open'?'selected':''}>Manual buka</option>
       <option value="manual_closed" ${state.settings.operationMode==='manual_closed'?'selected':''}>Manual tutup / cuti</option>
     </select></div>
-    <div class="row"><div class="field" style="flex:1"><label>Jam Buka</label><input type="time" value="${esc(state.settings.openTime)}" onchange="updateSetting('openTime',this.value)"></div><div class="field" style="flex:1"><label>Jam Tutup</label><input type="time" value="${esc(state.settings.closeTime)}" onchange="updateSetting('closeTime',this.value)"></div></div>
-    <label class="toggle-row"><input type="checkbox" ${state.settings.enforceHours?'checked':''} onchange="updateSetting('enforceHours',this.checked)"><span>Blok mulai rental saat status TUTUP</span></label>
-    <label class="toggle-row"><input type="checkbox" ${state.settings.sound?'checked':''} onchange="updateSetting('sound',this.checked)"><span>Suara alert timer habis</span></label>
+    <div class="row"><div class="field" style="flex:1"><label>Jam Buka WIB</label><input id="setOpenTime" type="time" value="${esc(state.settings.openTime)}"></div><div class="field" style="flex:1"><label>Jam Tutup WIB</label><input id="setCloseTime" type="time" value="${esc(state.settings.closeTime)}"></div></div>
+    <label class="toggle-row"><input id="setEnforceHours" type="checkbox" ${state.settings.enforceHours?'checked':''}><span>Blok mulai rental saat status TUTUP</span></label>
+    <label class="toggle-row"><input id="setSound" type="checkbox" ${state.settings.sound?'checked':''}><span>Suara alert timer habis</span></label>
+    <div class="privacy-note">Tanggal laporan memakai WIB. Saat masuk hari baru, omset Hari Ini otomatis kembali Rp 0, tapi data kemarin tetap bisa dicek di laporan 7 hari / custom.</div>
   </div>
 
-  <section class="section-title"><h3>Laporan Privat</h3><span>tidak tampil di menu bawah</span></section>
+  <section class="section-title"><h3>Google Sync Data</h3><span>owner + bini</span></section>
+  <div class="card start-panel sync-panel">
+    <label class="toggle-row"><input id="setSyncEnabled" type="checkbox" ${state.settings.syncEnabled?'checked':''}><span>Aktifkan Google Sync realtime</span></label>
+    <div class="field"><label>Nama device</label><input id="setSyncDeviceName" value="${esc(state.settings.syncDeviceName || 'Owner 1')}" placeholder="Contoh: HP Owner / HP Bini"></div>
+    <div class="field"><label>URL Web App Google Apps Script</label><input id="setSyncUrl" value="${esc(state.settings.syncUrl || '')}" placeholder="https://script.google.com/macros/s/.../exec"></div>
+    <div class="privacy-note">Sync menarik/mengirim data unit aktif, status RC, paket, riwayat, dan laporan. Auto sync berjalan tiap 15 detik saat aktif.</div>
+    <div class="row unit-actions"><button class="btn primary" onclick="saveSettingsFromForm()">Simpan Setting</button><button class="btn green" onclick="syncNow()">Sync Sekarang</button><button class="btn ghost" onclick="syncPull(true)">Tarik Data</button></div>
+    <small class="sync-status">Status: ${esc(state.settings.syncStatus || 'Belum aktif')} ${state.settings.lastSyncAt ? '· ' + esc(state.settings.lastSyncAt) : ''}</small>
+  </div>
+
+  <section class="section-title"><h3>Laporan Privat</h3><span>di dalam setting</span></section>
   <details class="card private-report"><summary>Lihat laporan omset</summary>
     <div class="report-tabs"><button class="btn ${reportMode==='today'?'primary':'ghost'}" onclick="setReportMode('today')">Hari Ini</button><button class="btn ${reportMode==='7days'?'primary':'ghost'}" onclick="setReportMode('7days')">7 Hari</button><button class="btn ${reportMode==='month'?'primary':'ghost'}" onclick="setReportMode('month')">1 Bulan</button><button class="btn ${reportMode==='custom'?'primary':'ghost'}" onclick="setReportMode('custom')">Custom</button></div>
     ${reportMode==='custom'?`<div class="row"><div class="field" style="flex:1"><label>Dari</label><input type="date" value="${customStart}" onchange="customStart=this.value;render()"></div><div class="field" style="flex:1"><label>Sampai</label><input type="date" value="${customEnd}" onchange="customEnd=this.value;render()"></div></div>`:''}
-    <div class="privacy-note">Periode: ${dateRangeLabel(range.start, range.end)}</div>
+    <div class="privacy-note">Periode WIB: ${dateRangeLabel(range.start, range.end)}</div>
     <section class="grid stats private-stats"><div class="card metric"><small>Total Cash</small><strong>${rupiah(r.revenue)}</strong><div class="sub">${r.doneCount} sesi</div></div><div class="card metric"><small>Total Durasi</small><strong>${r.duration}m</strong><div class="sub">Top: ${esc(r.bestUnit)}</div></div></section>
     <section class="grid stats private-stats"><div class="card metric"><small>Rata-rata</small><strong>${rupiah(r.average)}</strong><div class="sub">Per sesi</div></div><div class="card metric"><small>Paket Laris</small><strong>${esc(r.best)}</strong><div class="sub">Periode ini</div></div></section>
     <button class="btn primary full" onclick="exportCSV()">Export CSV Periode Ini</button>
   </details>
 
+  <button class="btn primary full sticky-save" onclick="saveSettingsFromForm()">Simpan Semua Setting</button>
   <section class="section-title"><h3>Data Lokal</h3><span>device ini</span></section><div class="grid"><button class="btn red full" onclick="resetData()">Reset Semua Data</button></div>`;
 }
 function setReportMode(mode){ reportMode = mode; render(); }
@@ -443,9 +555,10 @@ function render(){
   const views = { dashboard:dashboardView, units:unitsView, packages:packagesView, history:historyView, settings:settingsView };
   renderShell((views[currentTab] || dashboardView)());
 }
-window.startSession = startSession; window.startPackageFromSelect = startPackageFromSelect; window.pauseSession = pauseSession; window.resumeSession = resumeSession; window.addMinutes = addMinutes; window.finishSession = finishSession; window.cancelSession = cancelSession; window.updatePackage = updatePackage; window.setUnitStatus = setUnitStatus; window.updateUnit = updateUnit; window.addUnit = addUnit; window.deleteUnit = deleteUnit; window.updateSetting = updateSetting; window.uploadLogo = uploadLogo; window.clearLogo = clearLogo; window.exportCSV = exportCSV; window.resetData = resetData; window.setReportMode = setReportMode;
+window.startSession = startSession; window.startPackageFromSelect = startPackageFromSelect; window.pauseSession = pauseSession; window.resumeSession = resumeSession; window.addMinutes = addMinutes; window.finishSession = finishSession; window.cancelSession = cancelSession; window.updatePackage = updatePackage; window.setUnitStatus = setUnitStatus; window.updateUnit = updateUnit; window.addUnit = addUnit; window.deleteUnit = deleteUnit; window.updateSetting = updateSetting; window.uploadLogo = uploadLogo; window.saveSettingsFromForm = saveSettingsFromForm; window.syncNow = syncNow; window.syncPull = syncPull; window.syncPush = syncPush; window.clearLogo = clearLogo; window.exportCSV = exportCSV; window.resetData = resetData; window.setReportMode = setReportMode;
 
 setInterval(()=>{ if (state.activeSessions.length) render(); }, 1000);
+setInterval(()=>{ if (canSync()) syncPull(false); }, SYNC_INTERVAL_MS);
 ensureDay(); syncUnitStatuses(state, true);
 
 // Mobile-first: prevent accidental pinch zoom / double tap zoom in owner app.
