@@ -1,0 +1,14 @@
+{
+  "name": "SATSET PLAYZONE",
+  "short_name": "PLAYZONE",
+  "description": "Owner PWA untuk timer rental RC Excavator dan laporan omset cash.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#f59e0b",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/icons/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
