@@ -36,7 +36,7 @@ function loadState(){
     sessions: [],
     activeSessions: [],
     activeSession: null,
-    settings: { pin: '', ownerName: 'Owner', sound: true, openTime: '09:00', closeTime: '21:00', enforceHours: false }
+    settings: { pin: '', ownerName: 'Owner', sound: true, openTime: '09:00', closeTime: '21:00', enforceHours: false, operationMode: 'auto', businessName: 'SATSET PLAYZONE', profileText: 'Owner control · Multi unit RC · Cash only', logoText: 'SP', logoImage: '' }
   };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -54,7 +54,7 @@ function migrateState(s){
     s.activeSessions.unshift(s.activeSession);
     s.activeSession = null;
   }
-  s.settings = { pin: '', ownerName: 'Owner', sound: true, openTime: '09:00', closeTime: '21:00', enforceHours: false, ...(s.settings || {}) };
+  s.settings = { pin: '', ownerName: 'Owner', sound: true, openTime: '09:00', closeTime: '21:00', enforceHours: false, operationMode: 'auto', businessName: 'SATSET PLAYZONE', profileText: 'Owner control · Multi unit RC · Cash only', logoText: 'SP', logoImage: '', ...(s.settings || {}) };
   syncUnitStatuses(s, false);
   return s;
 }
@@ -66,7 +66,7 @@ function ensureDay(){
     saveState();
   }
 }
-function isOperatingNow(){
+function isWithinOperatingHours(){
   const now = new Date();
   const current = now.getHours() * 60 + now.getMinutes();
   const open = toMinutes(state.settings.openTime);
@@ -75,7 +75,25 @@ function isOperatingNow(){
   if (open < close) return current >= open && current < close;
   return current >= open || current < close;
 }
-function operatingLabel(){ return isOperatingNow() ? 'BUKA' : 'TUTUP'; }
+function isOperatingNow(){
+  if (state.settings.operationMode === 'manual_open') return true;
+  if (state.settings.operationMode === 'manual_closed') return false;
+  return isWithinOperatingHours();
+}
+function operatingLabel(){
+  if (state.settings.operationMode === 'manual_open') return 'BUKA';
+  if (state.settings.operationMode === 'manual_closed') return 'TUTUP';
+  return isOperatingNow() ? 'BUKA' : 'TUTUP';
+}
+function operationModeLabel(){
+  if (state.settings.operationMode === 'manual_open') return 'Manual buka';
+  if (state.settings.operationMode === 'manual_closed') return 'Manual tutup/cuti';
+  return `Otomatis ${state.settings.openTime} - ${state.settings.closeTime}`;
+}
+function brandLogoHtml(){
+  if (state.settings.logoImage) return `<img src="${esc(state.settings.logoImage)}" alt="Logo" />`;
+  return esc(state.settings.logoText || 'SP');
+}
 function activeForUnit(unitId){ return state.activeSessions.find(s => s.unitId === unitId); }
 function syncUnitStatuses(target = state, persist = true){
   const activeIds = new Set((target.activeSessions || []).map(s => s.unitId).filter(Boolean));
@@ -251,6 +269,23 @@ function exportCSV(){
   a.href = url; a.download = `satset-playzone-report-${range.start}-${range.end}.csv`; a.click();
   URL.revokeObjectURL(url);
 }
+
+function uploadLogo(input){
+  const file = input.files && input.files[0];
+  if (!file) return;
+  if (!file.type.startsWith('image/')) return toast('File logo harus gambar.');
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.settings.logoImage = reader.result;
+    saveState(); render(); toast('Logo berhasil diganti.');
+  };
+  reader.readAsDataURL(file);
+}
+function clearLogo(){
+  state.settings.logoImage = '';
+  saveState(); render(); toast('Logo gambar dihapus.');
+}
+
 function resetData(){
   if (!confirm('Hapus semua data lokal SATSET PLAYZONE?')) return;
   localStorage.removeItem(STORAGE_KEY); location.reload();
@@ -278,14 +313,14 @@ function renderShell(content){
     <main class="app">
       <header class="topbar">
         <div class="brand">
-          <div class="logo">SP</div>
-          <div><h1>SATSET PLAYZONE</h1><p>Owner control · Multi unit RC · Cash only</p></div>
+          <div class="logo">${brandLogoHtml()}</div>
+          <div><h1>${esc(state.settings.businessName || 'SATSET PLAYZONE')}</h1><p>${esc(state.settings.profileText || 'Owner control · Multi unit RC · Cash only')}</p></div>
           <div class="status-pill ${open ? 'open' : ''}">${operatingLabel()}</div>
         </div>
       </header>
       ${content}
-      <nav class="bottom-nav nav-six">
-        ${navButton('dashboard','Beranda')}${navButton('units','Unit')}${navButton('packages','Paket')}${navButton('history','Riwayat')}${navButton('report','Laporan')}${navButton('settings','Setting')}
+      <nav class="bottom-nav nav-five">
+        ${navButton('dashboard','Beranda')}${navButton('units','Unit')}${navButton('packages','Paket')}${navButton('history','Riwayat')}${navButton('settings','Setting')}
       </nav>
       <div id="toast" class="toast"></div>
     </main>`;
@@ -297,7 +332,7 @@ function dashboardView(){
   const available = state.units.filter(u => u.status === 'available').length;
   const broken = state.units.filter(u => u.status === 'broken').length;
   return `
-    <section class="card hero compact-hero"><h2>Kontrol rental RC</h2><p>Jam operasional otomatis: ${state.settings.openTime} - ${state.settings.closeTime}. Cash only.</p></section>
+    <section class="card hero compact-hero"><h2>Kontrol rental RC</h2><p>${operationModeLabel()}. Cash only.</p></section>
     <section class="section-title"><h3>Status Unit</h3><span>${available}/${state.units.length} tersedia · ${broken} rusak</span></section>
     <div class="unit-strip">${state.units.map(unitMini).join('')}</div>
     <section class="section-title"><h3>Mulai Rental</h3><span>Pilih unit + paket</span></section>
@@ -363,21 +398,64 @@ function reportView(){
   <section class="section-title"><h3>Export</h3><span>${list.length} sesi</span></section><button class="btn primary full" onclick="exportCSV()">Export CSV Periode Ini</button>`;
 }
 function settingsView(){
-  return `<section class="card hero"><h2>Setting Operasional</h2><p>Buka/tutup sekarang otomatis dari jam operasional. Tidak ada tombol buka/tutup manual di Beranda.</p></section>
-  <section class="section-title"><h3>Jam Operasional</h3><span>${operatingLabel()}</span></section>
-  <div class="card start-panel"><div class="row"><div class="field" style="flex:1"><label>Jam Buka</label><input type="time" value="${esc(state.settings.openTime)}" onchange="updateSetting('openTime',this.value)"></div><div class="field" style="flex:1"><label>Jam Tutup</label><input type="time" value="${esc(state.settings.closeTime)}" onchange="updateSetting('closeTime',this.value)"></div></div><label class="toggle-row"><input type="checkbox" ${state.settings.enforceHours?'checked':''} onchange="updateSetting('enforceHours',this.checked)"><span>Blok mulai rental di luar jam operasional</span></label><label class="toggle-row"><input type="checkbox" ${state.settings.sound?'checked':''} onchange="updateSetting('sound',this.checked)"><span>Suara alert timer habis</span></label></div>
+  const range = getReportRange();
+  const list = sessionsBetween(range.start, range.end);
+  const r = calcReport(list);
+  return `<section class="card hero"><h2>Setting & Privasi</h2><p>Atur jam buka, mode cuti/manual, profil, logo, dan laporan privat dari satu tempat.</p></section>
+  <section class="section-title"><h3>Profil Aplikasi</h3><span>logo & nama</span></section>
+  <div class="card start-panel">
+    <div class="row profile-row"><div class="logo logo-preview">${brandLogoHtml()}</div><div style="flex:1"><strong>${esc(state.settings.businessName || 'SATSET PLAYZONE')}</strong><small>${esc(state.settings.profileText || '')}</small></div></div>
+    <div class="field"><label>Nama aplikasi</label><input value="${esc(state.settings.businessName)}" onchange="updateSetting('businessName',this.value)" placeholder="SATSET PLAYZONE"></div>
+    <div class="field"><label>Profil / tagline kecil</label><input value="${esc(state.settings.profileText)}" onchange="updateSetting('profileText',this.value)" placeholder="Owner control · Multi unit RC · Cash only"></div>
+    <div class="field"><label>Teks logo jika tanpa gambar</label><input maxlength="4" value="${esc(state.settings.logoText)}" onchange="updateSetting('logoText',this.value)" placeholder="SP"></div>
+    <div class="field"><label>Upload logo gambar</label><input type="file" accept="image/*" onchange="uploadLogo(this)"></div>
+    <button class="btn ghost full" onclick="clearLogo()">Hapus Logo Gambar</button>
+  </div>
+
+  <section class="section-title"><h3>Buka / Tutup</h3><span>${operatingLabel()}</span></section>
+  <div class="card start-panel">
+    <div class="field"><label>Mode operasional</label><select onchange="updateSetting('operationMode',this.value)">
+      <option value="auto" ${state.settings.operationMode==='auto'?'selected':''}>Otomatis sesuai jam</option>
+      <option value="manual_open" ${state.settings.operationMode==='manual_open'?'selected':''}>Manual buka</option>
+      <option value="manual_closed" ${state.settings.operationMode==='manual_closed'?'selected':''}>Manual tutup / cuti</option>
+    </select></div>
+    <div class="row"><div class="field" style="flex:1"><label>Jam Buka</label><input type="time" value="${esc(state.settings.openTime)}" onchange="updateSetting('openTime',this.value)"></div><div class="field" style="flex:1"><label>Jam Tutup</label><input type="time" value="${esc(state.settings.closeTime)}" onchange="updateSetting('closeTime',this.value)"></div></div>
+    <label class="toggle-row"><input type="checkbox" ${state.settings.enforceHours?'checked':''} onchange="updateSetting('enforceHours',this.checked)"><span>Blok mulai rental saat status TUTUP</span></label>
+    <label class="toggle-row"><input type="checkbox" ${state.settings.sound?'checked':''} onchange="updateSetting('sound',this.checked)"><span>Suara alert timer habis</span></label>
+  </div>
+
+  <section class="section-title"><h3>Laporan Privat</h3><span>tidak tampil di menu bawah</span></section>
+  <details class="card private-report"><summary>Lihat laporan omset</summary>
+    <div class="report-tabs"><button class="btn ${reportMode==='today'?'primary':'ghost'}" onclick="setReportMode('today')">Hari Ini</button><button class="btn ${reportMode==='7days'?'primary':'ghost'}" onclick="setReportMode('7days')">7 Hari</button><button class="btn ${reportMode==='month'?'primary':'ghost'}" onclick="setReportMode('month')">1 Bulan</button><button class="btn ${reportMode==='custom'?'primary':'ghost'}" onclick="setReportMode('custom')">Custom</button></div>
+    ${reportMode==='custom'?`<div class="row"><div class="field" style="flex:1"><label>Dari</label><input type="date" value="${customStart}" onchange="customStart=this.value;render()"></div><div class="field" style="flex:1"><label>Sampai</label><input type="date" value="${customEnd}" onchange="customEnd=this.value;render()"></div></div>`:''}
+    <div class="privacy-note">Periode: ${dateRangeLabel(range.start, range.end)}</div>
+    <section class="grid stats private-stats"><div class="card metric"><small>Total Cash</small><strong>${rupiah(r.revenue)}</strong><div class="sub">${r.doneCount} sesi</div></div><div class="card metric"><small>Total Durasi</small><strong>${r.duration}m</strong><div class="sub">Top: ${esc(r.bestUnit)}</div></div></section>
+    <section class="grid stats private-stats"><div class="card metric"><small>Rata-rata</small><strong>${rupiah(r.average)}</strong><div class="sub">Per sesi</div></div><div class="card metric"><small>Paket Laris</small><strong>${esc(r.best)}</strong><div class="sub">Periode ini</div></div></section>
+    <button class="btn primary full" onclick="exportCSV()">Export CSV Periode Ini</button>
+  </details>
+
   <section class="section-title"><h3>Data Lokal</h3><span>device ini</span></section><div class="grid"><button class="btn red full" onclick="resetData()">Reset Semua Data</button></div>`;
 }
 function setReportMode(mode){ reportMode = mode; render(); }
 
 function render(){
   ensureDay(); syncUnitStatuses(state, false);
-  const views = { dashboard:dashboardView, units:unitsView, packages:packagesView, history:historyView, report:reportView, settings:settingsView };
+  const views = { dashboard:dashboardView, units:unitsView, packages:packagesView, history:historyView, settings:settingsView };
   renderShell((views[currentTab] || dashboardView)());
 }
-window.startSession = startSession; window.startPackageFromSelect = startPackageFromSelect; window.pauseSession = pauseSession; window.resumeSession = resumeSession; window.addMinutes = addMinutes; window.finishSession = finishSession; window.cancelSession = cancelSession; window.updatePackage = updatePackage; window.setUnitStatus = setUnitStatus; window.updateUnit = updateUnit; window.addUnit = addUnit; window.deleteUnit = deleteUnit; window.updateSetting = updateSetting; window.exportCSV = exportCSV; window.resetData = resetData; window.setReportMode = setReportMode;
+window.startSession = startSession; window.startPackageFromSelect = startPackageFromSelect; window.pauseSession = pauseSession; window.resumeSession = resumeSession; window.addMinutes = addMinutes; window.finishSession = finishSession; window.cancelSession = cancelSession; window.updatePackage = updatePackage; window.setUnitStatus = setUnitStatus; window.updateUnit = updateUnit; window.addUnit = addUnit; window.deleteUnit = deleteUnit; window.updateSetting = updateSetting; window.uploadLogo = uploadLogo; window.clearLogo = clearLogo; window.exportCSV = exportCSV; window.resetData = resetData; window.setReportMode = setReportMode;
 
 setInterval(()=>{ if (state.activeSessions.length) render(); }, 1000);
 ensureDay(); syncUnitStatuses(state, true);
+
+// Mobile-first: prevent accidental pinch zoom / double tap zoom in owner app.
+document.addEventListener('touchmove', (event) => { if (event.touches && event.touches.length > 1) event.preventDefault(); }, { passive:false });
+document.addEventListener('gesturestart', (event) => event.preventDefault());
+let lastTouchEnd = 0;
+document.addEventListener('touchend', (event) => {
+  const now = Date.now();
+  if (now - lastTouchEnd <= 300) event.preventDefault();
+  lastTouchEnd = now;
+}, { passive:false });
 if ('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js'));
 render();
