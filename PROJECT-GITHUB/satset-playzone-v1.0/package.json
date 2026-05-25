@@ -1,13 +1,9 @@
 {
   "name": "satset-playzone",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "SATSET PLAYZONE Owner-only PWA for multi-unit RC rental timer, editable units, WIB reports, private settings reports, and Google Sync data.",
   "scripts": {
-    "start": "python3 -m http.server 5173",
-    "build": "mkdir -p dist && cp -r index.html styles.css app.js manifest.webmanifest sw.js icons _redirects dist/"
+    "build": "rm -rf dist && mkdir -p dist && cp -r index.html styles.css app.js manifest.webmanifest sw.js _redirects icons dist/"
   },
-  "keywords": ["pwa", "rental", "timer", "multi-unit", "satset-playzone"],
-  "author": "SATSET PLAYZONE",
-  "license": "UNLICENSED"
+  "devDependencies": {}
 }
