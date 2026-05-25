@@ -1,8 +1,8 @@
 {
   "name": "satset-playzone",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "SATSET PLAYZONE Owner-only PWA for multi-unit RC rental timer and cash reports.",
+  "description": "SATSET PLAYZONE Owner-only PWA for multi-unit RC rental timer, editable units, auto hours, and cash reports.",
   "scripts": {
     "start": "python3 -m http.server 5173",
     "build": "mkdir -p dist && cp -r index.html styles.css app.js manifest.webmanifest sw.js icons _redirects dist/"
